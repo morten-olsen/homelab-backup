@@ -1,0 +1,17 @@
+apiVersion: v2
+name: longhorn-backup
+description: Backup solution for Longhorn PVCs with TrueNAS (NFS) and Backblaze B2 support
+type: application
+version: 1.0.0
+appVersion: "1.0.0"
+keywords:
+  - backup
+  - longhorn
+  - kubernetes
+  - disaster-recovery
+  - truenas
+  - backblaze
+home: https://github.com/your-org/longhorn-backup
+maintainers:
+  - name: Your Name
+    email: your@email.com

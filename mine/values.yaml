@@ -1,0 +1,55 @@
+# Production values - NFS backup only (B2 disabled for now)
+
+# Longhorn namespace
+longhorn:
+  namespace: longhorn
+
+# TrueNAS NFS configuration
+nfs:
+  enabled: true
+  server: "192.168.20.106"
+  path: "/mnt/HDD/k8s/backups"
+
+# Backblaze B2 - disabled for initial deployment
+backblaze:
+  enabled: false
+
+# Backup schedules
+recurringJobs:
+  daily:
+    enabled: true
+    schedule: "0 2 * * *"
+    retain: 7
+    concurrency: 2
+    labels:
+      backup.home.lab/tier: daily
+
+  weekly:
+    enabled: true
+    schedule: "0 3 * * 0"
+    retain: 5
+    concurrency: 2
+    labels:
+      backup.home.lab/tier: weekly
+
+  snapshot:
+    enabled: true
+    schedule: "0 */6 * * *"
+    retain: 4
+    concurrency: 2
+
+# B2 sync - disabled
+b2Sync:
+  enabled: false
+
+# Validation - disabled for now
+validation:
+  enabled: true
+
+# Indexer - disabled for now
+indexer:
+  enabled: true
+
+# Notifications - disabled for now
+notifications:
+  enabled: false

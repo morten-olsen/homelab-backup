@@ -1,0 +1,56 @@
+{{- if .Values.recurringJobs.daily.enabled }}
+---
+apiVersion: longhorn.io/v1beta2
+kind: RecurringJob
+metadata:
+  name: {{ include "longhorn-backup.fullname" . }}-daily-backup
+  namespace: {{ .Values.longhorn.namespace }}
+  labels:
+    {{- include "longhorn-backup.labels" . | nindent 4 }}
+spec:
+  name: daily-backup
+  task: backup
+  cron: {{ .Values.recurringJobs.daily.schedule | quote }}
+  retain: {{ .Values.recurringJobs.daily.retain }}
+  concurrency: {{ .Values.recurringJobs.daily.concurrency }}
+  {{- if .Values.recurringJobs.daily.labels }}
+  labels:
+    {{- toYaml .Values.recurringJobs.daily.labels | nindent 4 }}
+  {{- end }}
+{{- end }}
+{{- if .Values.recurringJobs.weekly.enabled }}
+---
+apiVersion: longhorn.io/v1beta2
+kind: RecurringJob
+metadata:
+  name: {{ include "longhorn-backup.fullname" . }}-weekly-backup
+  namespace: {{ .Values.longhorn.namespace }}
+  labels:
+    {{- include "longhorn-backup.labels" . | nindent 4 }}
+spec:
+  name: weekly-backup
+  task: backup
+  cron: {{ .Values.recurringJobs.weekly.schedule | quote }}
+  retain: {{ .Values.recurringJobs.weekly.retain }}
+  concurrency: {{ .Values.recurringJobs.weekly.concurrency }}
+  {{- if .Values.recurringJobs.weekly.labels }}
+  labels:
+    {{- toYaml .Values.recurringJobs.weekly.labels | nindent 4 }}
+  {{- end }}
+{{- end }}
+{{- if .Values.recurringJobs.snapshot.enabled }}
+---
+apiVersion: longhorn.io/v1beta2
+kind: RecurringJob
+metadata:
+  name: {{ include "longhorn-backup.fullname" . }}-snapshot
+  namespace: {{ .Values.longhorn.namespace }}
+  labels:
+    {{- include "longhorn-backup.labels" . | nindent 4 }}
+spec:
+  name: snapshot
+  task: snapshot
+  cron: {{ .Values.recurringJobs.snapshot.schedule | quote }}
+  retain: {{ .Values.recurringJobs.snapshot.retain }}
+  concurrency: {{ .Values.recurringJobs.snapshot.concurrency }}
+{{- end }}

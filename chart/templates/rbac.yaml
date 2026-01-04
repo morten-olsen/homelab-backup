@@ -1,0 +1,57 @@
+{{- if .Values.serviceAccount.create }}
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: {{ include "longhorn-backup.serviceAccountName" . }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "longhorn-backup.labels" . | nindent 4 }}
+  {{- with .Values.serviceAccount.annotations }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+{{- end }}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: {{ include "longhorn-backup.fullname" . }}
+  labels:
+    {{- include "longhorn-backup.labels" . | nindent 4 }}
+rules:
+  # PVC access for backup validation and indexing
+  - apiGroups: [""]
+    resources: ["persistentvolumeclaims"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: [""]
+    resources: ["persistentvolumes"]
+    verbs: ["get", "list", "watch"]
+  # Longhorn resources
+  - apiGroups: ["longhorn.io"]
+    resources:
+      - volumes
+      - backups
+      - backupvolumes
+      - backuptargets
+      - recurringjobs
+      - snapshots
+    verbs: ["get", "list", "watch"]
+  # Namespaces for listing PVCs across cluster
+  - apiGroups: [""]
+    resources: ["namespaces"]
+    verbs: ["get", "list"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: {{ include "longhorn-backup.fullname" . }}
+  labels:
+    {{- include "longhorn-backup.labels" . | nindent 4 }}
+subjects:
+  - kind: ServiceAccount
+    name: {{ include "longhorn-backup.serviceAccountName" . }}
+    namespace: {{ .Release.Namespace }}
+roleRef:
+  kind: ClusterRole
+  name: {{ include "longhorn-backup.fullname" . }}
+  apiGroup: rbac.authorization.k8s.io

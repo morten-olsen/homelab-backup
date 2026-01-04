@@ -1,0 +1,179 @@
+# Longhorn Backup Configuration
+# This chart sets up automated backups for Longhorn PVCs to TrueNAS (NFS) and Backblaze B2
+
+# Longhorn namespace (where Longhorn is installed)
+longhorn:
+  namespace: longhorn
+
+# Primary backup target: TrueNAS NFS
+nfs:
+  enabled: true
+  # NFS server IP or hostname
+  server: "192.168.1.100"
+  # NFS export path
+  path: "/mnt/pool/kubernetes-backups"
+
+# Secondary backup target: Backblaze B2 (encrypted)
+backblaze:
+  enabled: true
+  # B2 bucket name
+  bucket: "your-bucket-name"
+  # B2 endpoint (adjust region as needed)
+  # Common endpoints:
+  #   us-west-004: https://s3.us-west-004.backblazeb2.com
+  #   us-west-002: https://s3.us-west-002.backblazeb2.com
+  #   eu-central-003: https://s3.eu-central-003.backblazeb2.com
+  endpoint: "https://s3.us-west-004.backblazeb2.com"
+  
+  # Secret containing B2 credentials
+  # Expected keys: AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY
+  existingSecret: ""
+  # If not using existingSecret, credentials will be created from these
+  # (Not recommended - use sealed secrets instead)
+  credentials:
+    accessKeyId: ""
+    secretAccessKey: ""
+  
+  # Encryption settings
+  encryption:
+    # Secret containing encryption keys
+    # Expected keys: password, salt
+    existingSecret: ""
+    # If not using existingSecret (not recommended)
+    password: ""
+    salt: ""
+
+# Recurring backup jobs
+recurringJobs:
+  # Daily backup job
+  daily:
+    enabled: true
+    # Cron schedule (default: 2 AM daily)
+    schedule: "0 2 * * *"
+    # Number of backups to retain
+    retain: 7
+    # Concurrency limit
+    concurrency: 2
+    # Labels to identify volumes for this job
+    labels:
+      backup.home.lab/tier: daily
+  
+  # Weekly backup job
+  weekly:
+    enabled: true
+    # Cron schedule (default: 3 AM Sunday)
+    schedule: "0 3 * * 0"
+    # Number of backups to retain
+    retain: 5
+    concurrency: 2
+    labels:
+      backup.home.lab/tier: weekly
+  
+  # Snapshot job (local snapshots, more frequent)
+  snapshot:
+    enabled: true
+    # Every 6 hours
+    schedule: "0 */6 * * *"
+    retain: 4
+    concurrency: 2
+
+# B2 sync job (syncs NFS backups to B2 with encryption)
+b2Sync:
+  enabled: true
+  # Run after Longhorn backups complete
+  schedule: "0 4 * * *"
+  # Container image
+  image:
+    repository: rclone/rclone
+    tag: "1.68"
+    pullPolicy: IfNotPresent
+  # Resource limits
+  resources:
+    limits:
+      memory: 512Mi
+      cpu: 500m
+    requests:
+      memory: 256Mi
+      cpu: 100m
+  # Rclone transfer settings
+  transfers: 4
+  checkers: 8
+  # Cleanup old B2 backups after N days
+  cleanupAgeDays: 35
+
+# Backup validation job
+validation:
+  enabled: true
+  # Run validation check daily
+  schedule: "0 6 * * *"
+  image:
+    repository: bitnami/kubectl
+    tag: "latest"
+    pullPolicy: IfNotPresent
+  # Maximum backup age before warning (hours)
+  warningAgeHours: 25
+  # Maximum backup age before error (hours)
+  errorAgeHours: 48
+  resources:
+    limits:
+      memory: 256Mi
+      cpu: 200m
+    requests:
+      memory: 128Mi
+      cpu: 50m
+
+# Backup indexer job (generates metadata index)
+indexer:
+  enabled: true
+  # Run after backups and sync complete
+  schedule: "30 4 * * *"
+  image:
+    repository: bitnami/kubectl
+    tag: "latest"
+    pullPolicy: IfNotPresent
+  resources:
+    limits:
+      memory: 256Mi
+      cpu: 200m
+    requests:
+      memory: 128Mi
+      cpu: 50m
+
+# Notifications (webhook)
+notifications:
+  enabled: false
+  # Webhook URL (Discord, Slack, etc.)
+  webhookUrl: ""
+  # Or use existing secret with 'url' key
+  existingSecret: ""
+
+# Labels to identify PVCs that should be backed up
+# PVCs must have label: backup.home.lab/enabled: "true"
+pvcSelector:
+  labelKey: "backup.home.lab/enabled"
+  labelValue: "true"
+
+# ServiceAccount settings
+serviceAccount:
+  create: true
+  name: backup-manager
+  annotations: {}
+
+# Pod security context
+podSecurityContext:
+  runAsNonRoot: false
+  fsGroup: 0
+
+# Container security context
+securityContext:
+  runAsUser: 0
+  runAsGroup: 0
+
+# Node selector for backup jobs
+nodeSelector: {}
+
+# Tolerations for backup jobs
+tolerations: []
+
+# Affinity for backup jobs
+affinity: {}

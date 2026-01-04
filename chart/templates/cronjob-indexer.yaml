@@ -1,0 +1,83 @@
+{{- if .Values.indexer.enabled }}
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: {{ include "longhorn-backup.fullname" . }}-indexer
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "longhorn-backup.labels" . | nindent 4 }}
+spec:
+  schedule: {{ .Values.indexer.schedule | quote }}
+  concurrencyPolicy: Forbid
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 3
+  jobTemplate:
+    spec:
+      backoffLimit: 1
+      template:
+        metadata:
+          labels:
+            {{- include "longhorn-backup.selectorLabels" . | nindent 12 }}
+            app.kubernetes.io/component: indexer
+        spec:
+          serviceAccountName: {{ include "longhorn-backup.serviceAccountName" . }}
+          restartPolicy: OnFailure
+          {{- with .Values.nodeSelector }}
+          nodeSelector:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          {{- with .Values.tolerations }}
+          tolerations:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          {{- with .Values.affinity }}
+          affinity:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          securityContext:
+            {{- toYaml .Values.podSecurityContext | nindent 12 }}
+          containers:
+            - name: indexer
+              image: "{{ .Values.indexer.image.repository }}:{{ .Values.indexer.image.tag }}"
+              imagePullPolicy: {{ .Values.indexer.image.pullPolicy }}
+              command:
+                - /bin/bash
+                - -c
+                - |
+                  source /scripts/send-notification.sh
+                  /scripts/generate-index.sh
+              env:
+                {{- if .Values.notifications.enabled }}
+                - name: WEBHOOK_URL
+                  {{- if .Values.notifications.existingSecret }}
+                  valueFrom:
+                    secretKeyRef:
+                      name: {{ .Values.notifications.existingSecret }}
+                      key: url
+                  {{- else }}
+                  value: {{ .Values.notifications.webhookUrl | quote }}
+                  {{- end }}
+                {{- end }}
+              securityContext:
+                {{- toYaml .Values.securityContext | nindent 16 }}
+              resources:
+                {{- toYaml .Values.indexer.resources | nindent 16 }}
+              volumeMounts:
+                - name: scripts
+                  mountPath: /scripts
+                {{- if .Values.nfs.enabled }}
+                - name: backup-target
+                  mountPath: /backup-target
+                {{- end }}
+          volumes:
+            - name: scripts
+              configMap:
+                name: {{ include "longhorn-backup.fullname" . }}-scripts
+                defaultMode: 0755
+            {{- if .Values.nfs.enabled }}
+            - name: backup-target
+              nfs:
+                server: {{ .Values.nfs.server }}
+                path: {{ .Values.nfs.path }}
+            {{- end }}
+{{- end }}

@@ -1,0 +1,74 @@
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: longhorn-backup
+  namespace: argocd
+spec:
+  project: default
+  source:
+    repoURL: https://github.com/morten-olsen/homelab-backup
+    targetRevision: main
+    path: chart
+    helm:
+      values: |
+        # Longhorn namespace
+        longhorn:
+          namespace: {{ .Values.longhorn.namespace }}
+
+        # TrueNAS NFS configuration
+        nfs:
+          enabled: {{ .Values.nfs.enabled }}
+          server: {{ .Values.nfs.server | quote }}
+          path: {{ .Values.nfs.path | quote }}
+
+        # Backblaze B2
+        backblaze:
+          enabled: {{ .Values.backblaze.enabled }}
+
+        # Backup schedules
+        recurringJobs:
+          daily:
+            enabled: {{ .Values.recurringJobs.daily.enabled }}
+            schedule: {{ .Values.recurringJobs.daily.schedule | quote }}
+            retain: {{ .Values.recurringJobs.daily.retain }}
+            concurrency: {{ .Values.recurringJobs.daily.concurrency }}
+            labels:
+              backup.home.lab/tier: daily
+          weekly:
+            enabled: {{ .Values.recurringJobs.weekly.enabled }}
+            schedule: {{ .Values.recurringJobs.weekly.schedule | quote }}
+            retain: {{ .Values.recurringJobs.weekly.retain }}
+            concurrency: {{ .Values.recurringJobs.weekly.concurrency }}
+            labels:
+              backup.home.lab/tier: weekly
+          snapshot:
+            enabled: {{ .Values.recurringJobs.snapshot.enabled }}
+            schedule: {{ .Values.recurringJobs.snapshot.schedule | quote }}
+            retain: {{ .Values.recurringJobs.snapshot.retain }}
+            concurrency: {{ .Values.recurringJobs.snapshot.concurrency }}
+
+        # B2 sync
+        b2Sync:
+          enabled: {{ .Values.b2Sync.enabled }}
+
+        # Validation
+        validation:
+          enabled: {{ .Values.validation.enabled }}
+
+        # Indexer
+        indexer:
+          enabled: {{ .Values.indexer.enabled }}
+
+        # Notifications
+        notifications:
+          enabled: {{ .Values.notifications.enabled }}
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: longhorn-backup
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    syncOptions:
+      - CreateNamespace=true
+

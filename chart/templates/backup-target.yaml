@@ -1,0 +1,15 @@
+{{- if .Values.nfs.enabled }}
+# Configure Longhorn BackupTarget for NFS
+# This replaces the default backup target in Longhorn
+apiVersion: longhorn.io/v1beta2
+kind: BackupTarget
+metadata:
+  name: default
+  namespace: {{ .Values.longhorn.namespace }}
+  labels:
+    {{- include "longhorn-backup.labels" . | nindent 4 }}
+spec:
+  backupTargetURL: {{ include "longhorn-backup.nfsTarget" . | quote }}
+  credentialSecret: ""
+  pollInterval: "5m"
+{{- end }}

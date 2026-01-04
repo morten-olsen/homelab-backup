@@ -1,0 +1,330 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "longhorn-backup.fullname" . }}-scripts
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "longhorn-backup.labels" . | nindent 4 }}
+data:
+  sync-to-b2.sh: |
+    #!/bin/bash
+    set -euo pipefail
+    
+    echo "=========================================="
+    echo "B2 Backup Sync - $(date -Iseconds)"
+    echo "=========================================="
+    
+    # Create rclone config directory
+    mkdir -p /tmp/rclone
+    
+    # Generate rclone config with encryption
+    # Note: password and salt are already rclone-obscured in the secret
+    cat > /tmp/rclone/rclone.conf << EOF
+    [nfs-source]
+    type = local
+    
+    [b2-raw]
+    type = b2
+    account = ${B2_ACCOUNT_ID}
+    key = ${B2_APPLICATION_KEY}
+    
+    [b2-encrypted]
+    type = crypt
+    remote = b2-raw:${B2_BUCKET}/longhorn-backups
+    password = ${RCLONE_CRYPT_PASSWORD}
+    password2 = ${RCLONE_CRYPT_SALT}
+    filename_encryption = standard
+    directory_name_encryption = true
+    EOF
+    
+    export RCLONE_CONFIG=/tmp/rclone/rclone.conf
+    
+    echo "Testing B2 connectivity..."
+    if ! rclone lsd b2-raw: > /dev/null 2>&1; then
+      echo "ERROR: Cannot connect to B2"
+      send_notification "error" "Cannot connect to Backblaze B2"
+      exit 1
+    fi
+    echo "B2 connection successful"
+    
+    echo ""
+    echo "Starting encrypted sync to B2..."
+    echo "Source: /backup-source"
+    echo "Destination: b2-encrypted:"
+    echo ""
+    
+    # Sync with progress and logging
+    rclone sync /backup-source b2-encrypted: \
+      --transfers {{ .Values.b2Sync.transfers }} \
+      --checkers {{ .Values.b2Sync.checkers }} \
+      --contimeout 60s \
+      --timeout 300s \
+      --retries 3 \
+      --low-level-retries 10 \
+      --stats 1m \
+      --stats-one-line \
+      --log-level INFO \
+      -v
+    
+    SYNC_EXIT=$?
+    
+    if [ $SYNC_EXIT -ne 0 ]; then
+      echo "ERROR: Sync failed with exit code $SYNC_EXIT"
+      send_notification "error" "B2 sync failed with exit code $SYNC_EXIT"
+      exit $SYNC_EXIT
+    fi
+    
+    echo ""
+    echo "Sync completed. Verifying backup integrity..."
+    
+    # Verify sync (one-way check)
+    if rclone check /backup-source b2-encrypted: --one-way 2>/dev/null; then
+      echo "Verification successful"
+    else
+      echo "WARNING: Some files may not have synced correctly"
+    fi
+    
+    echo ""
+    echo "Cleaning up old backups (older than {{ .Values.b2Sync.cleanupAgeDays }} days)..."
+    
+    # Get size before cleanup
+    SIZE_BEFORE=$(rclone size b2-encrypted: --json 2>/dev/null | jq -r '.bytes // 0')
+    
+    # Cleanup old versions/deleted files
+    rclone cleanup b2-raw:${B2_BUCKET} 2>/dev/null || true
+    
+    # Get size after
+    SIZE_AFTER=$(rclone size b2-encrypted: --json 2>/dev/null | jq -r '.bytes // 0')
+    SIZE_HUMAN=$(numfmt --to=iec ${SIZE_AFTER} 2>/dev/null || echo "${SIZE_AFTER} bytes")
+    
+    echo ""
+    echo "=========================================="
+    echo "B2 Sync Complete - $(date -Iseconds)"
+    echo "Total backup size: ${SIZE_HUMAN}"
+    echo "=========================================="
+    
+    send_notification "success" "B2 backup sync completed. Total size: ${SIZE_HUMAN}"
+    
+  send-notification.sh: |
+    #!/bin/bash
+    # Helper function for notifications
+    send_notification() {
+      local status=$1
+      local message=$2
+      
+      if [ -z "${WEBHOOK_URL:-}" ]; then
+        echo "No webhook configured, skipping notification"
+        return 0
+      fi
+      
+      local emoji="ℹ️"
+      case $status in
+        success) emoji="✅" ;;
+        warning) emoji="⚠️" ;;
+        error) emoji="❌" ;;
+      esac
+      
+      curl -s -X POST "${WEBHOOK_URL}" \
+        -H "Content-Type: application/json" \
+        -d "{\"content\":\"${emoji} **Longhorn Backup**: ${message}\"}" \
+        > /dev/null 2>&1 || true
+    }
+    export -f send_notification
+    
+  validate-backups.sh: |
+    #!/bin/bash
+    set -euo pipefail
+    
+    source /scripts/send-notification.sh
+    
+    echo "=========================================="
+    echo "Backup Validation - $(date -Iseconds)"
+    echo "=========================================="
+    
+    ERRORS=""
+    WARNINGS=""
+    LONGHORN_NS="{{ .Values.longhorn.namespace }}"
+    WARNING_AGE_HOURS={{ .Values.validation.warningAgeHours }}
+    ERROR_AGE_HOURS={{ .Values.validation.errorAgeHours }}
+    
+    # Get all PVCs with backup label
+    echo "Scanning for PVCs with label {{ .Values.pvcSelector.labelKey }}={{ .Values.pvcSelector.labelValue }}..."
+    
+    PVCS=$(kubectl get pvc -A -l {{ .Values.pvcSelector.labelKey }}={{ .Values.pvcSelector.labelValue }} -o json 2>/dev/null || echo '{"items":[]}')
+    PVC_COUNT=$(echo "$PVCS" | jq '.items | length')
+    
+    echo "Found ${PVC_COUNT} PVCs to validate"
+    echo ""
+    
+    if [ "$PVC_COUNT" -eq 0 ]; then
+      echo "WARNING: No PVCs found with backup label"
+      WARNINGS="${WARNINGS}No PVCs configured for backup\n"
+    fi
+    
+    # Check each PVC
+    echo "$PVCS" | jq -c '.items[]' | while read -r pvc; do
+      NAMESPACE=$(echo "$pvc" | jq -r '.metadata.namespace')
+      PVC_NAME=$(echo "$pvc" | jq -r '.metadata.name')
+      VOLUME_NAME=$(echo "$pvc" | jq -r '.spec.volumeName')
+      
+      echo "Checking ${NAMESPACE}/${PVC_NAME} (volume: ${VOLUME_NAME})..."
+      
+      if [ "$VOLUME_NAME" == "null" ] || [ -z "$VOLUME_NAME" ]; then
+        echo "  ⚠️ PVC not bound to a volume"
+        continue
+      fi
+      
+      # Get backup volume info from Longhorn (name may have suffix)
+      BACKUP_VOLUME=$(kubectl -n ${LONGHORN_NS} get backupvolume -o json 2>/dev/null | jq --arg vol "$VOLUME_NAME" '.items[] | select(.metadata.name | startswith($vol))' || echo '{}')
+      LAST_BACKUP=$(echo "$BACKUP_VOLUME" | jq -r '.status.lastBackupName // empty')
+      LAST_BACKUP_AT=$(echo "$BACKUP_VOLUME" | jq -r '.status.lastBackupAt // empty')
+      
+      if [ -z "$LAST_BACKUP" ]; then
+        echo "  ❌ No backups found"
+        ERRORS="${ERRORS}${NAMESPACE}/${PVC_NAME}: No backups found\n"
+        continue
+      fi
+      
+      # Check backup age
+      if [ -n "$LAST_BACKUP_AT" ]; then
+        BACKUP_EPOCH=$(date -d "$LAST_BACKUP_AT" +%s 2>/dev/null || echo "0")
+        NOW_EPOCH=$(date +%s)
+        AGE_HOURS=$(( (NOW_EPOCH - BACKUP_EPOCH) / 3600 ))
+        
+        if [ $AGE_HOURS -gt $ERROR_AGE_HOURS ]; then
+          echo "  ❌ Last backup ${AGE_HOURS}h ago (threshold: ${ERROR_AGE_HOURS}h)"
+          ERRORS="${ERRORS}${NAMESPACE}/${PVC_NAME}: Last backup ${AGE_HOURS}h ago\n"
+        elif [ $AGE_HOURS -gt $WARNING_AGE_HOURS ]; then
+          echo "  ⚠️ Last backup ${AGE_HOURS}h ago (threshold: ${WARNING_AGE_HOURS}h)"
+          WARNINGS="${WARNINGS}${NAMESPACE}/${PVC_NAME}: Last backup ${AGE_HOURS}h ago\n"
+        else
+          echo "  ✅ Last backup ${AGE_HOURS}h ago"
+        fi
+      fi
+    done
+    
+    # Check backup target accessibility
+    echo ""
+    echo "Checking backup target..."
+    {{- if .Values.nfs.enabled }}
+    if ls /backup-target > /dev/null 2>&1; then
+      BACKUP_COUNT=$(find /backup-target -maxdepth 3 -type d -name "backups" 2>/dev/null | wc -l)
+      echo "  ✅ NFS backup target accessible (${BACKUP_COUNT} backup directories found)"
+    else
+      echo "  ❌ Cannot access NFS backup target"
+      ERRORS="${ERRORS}Cannot access NFS backup target\n"
+    fi
+    {{- end }}
+    
+    # Summary
+    echo ""
+    echo "=========================================="
+    echo "Validation Summary"
+    echo "=========================================="
+    
+    if [ -n "$ERRORS" ]; then
+      echo "ERRORS:"
+      echo -e "$ERRORS"
+      send_notification "error" "Backup validation FAILED:\n${ERRORS}"
+      exit 1
+    elif [ -n "$WARNINGS" ]; then
+      echo "WARNINGS:"
+      echo -e "$WARNINGS"
+      send_notification "warning" "Backup validation warnings:\n${WARNINGS}"
+      exit 0
+    else
+      echo "All backups validated successfully!"
+      send_notification "success" "All backups validated successfully"
+      exit 0
+    fi
+    
+  generate-index.sh: |
+    #!/bin/bash
+    set -euo pipefail
+    
+    source /scripts/send-notification.sh
+    
+    echo "=========================================="
+    echo "Generating Backup Index - $(date -Iseconds)"
+    echo "=========================================="
+    
+    INDEX_FILE="/backup-target/backup-index.json"
+    README_FILE="/backup-target/BACKUP_README.md"
+    LONGHORN_NS="{{ .Values.longhorn.namespace }}"
+    
+    # Initialize index
+    TIMESTAMP=$(date -Iseconds)
+    echo '{"generated":"'"${TIMESTAMP}"'","cluster":"{{ .Release.Name }}","backups":[]}' > /tmp/backup-index.json
+    
+    # Get all PVCs with backup label
+    PVCS=$(kubectl get pvc -A -l {{ .Values.pvcSelector.labelKey }}={{ .Values.pvcSelector.labelValue }} -o json 2>/dev/null || echo '{"items":[]}')
+    
+    echo "$PVCS" | jq -c '.items[]' | while read -r pvc; do
+      NAMESPACE=$(echo "$pvc" | jq -r '.metadata.namespace')
+      PVC_NAME=$(echo "$pvc" | jq -r '.metadata.name')
+      VOLUME_NAME=$(echo "$pvc" | jq -r '.spec.volumeName')
+      STORAGE_SIZE=$(echo "$pvc" | jq -r '.spec.resources.requests.storage')
+      STORAGE_CLASS=$(echo "$pvc" | jq -r '.spec.storageClassName')
+      
+      echo "Indexing ${NAMESPACE}/${PVC_NAME}..."
+      
+      if [ "$VOLUME_NAME" == "null" ] || [ -z "$VOLUME_NAME" ]; then
+        continue
+      fi
+      
+      # Get backups for this volume (use full resource name to avoid conflicts with other CRDs)
+      BACKUPS=$(kubectl -n ${LONGHORN_NS} get backup.longhorn.io -l longhornvolume=${VOLUME_NAME} -o json 2>/dev/null | \
+        jq '[.items[] | {name: .metadata.name, created: .status.backupCreatedAt, size: .status.size, state: .status.state}]' 2>/dev/null || echo '[]')
+      
+      # Create entry
+      ENTRY=$(jq -n \
+        --arg ns "$NAMESPACE" \
+        --arg pvc "$PVC_NAME" \
+        --arg vol "$VOLUME_NAME" \
+        --arg size "$STORAGE_SIZE" \
+        --arg sc "$STORAGE_CLASS" \
+        --argjson backups "$BACKUPS" \
+        '{namespace: $ns, pvc_name: $pvc, volume_name: $vol, size: $size, storage_class: $sc, backups: $backups}')
+      
+      # Append to index
+      jq --argjson entry "$ENTRY" '.backups += [$entry]' /tmp/backup-index.json > /tmp/backup-index.tmp
+      mv /tmp/backup-index.tmp /tmp/backup-index.json
+    done
+    
+    # Generate README
+    cat > /tmp/BACKUP_README.md << 'HEADER'
+    # Kubernetes Backup Index
+    
+    This file provides an overview of all backed-up PVCs for disaster recovery purposes.
+    
+    HEADER
+    
+    echo "Generated: ${TIMESTAMP}" >> /tmp/BACKUP_README.md
+    echo "Cluster: {{ .Release.Name }}" >> /tmp/BACKUP_README.md
+    echo "" >> /tmp/BACKUP_README.md
+    echo "## Recovery Instructions" >> /tmp/BACKUP_README.md
+    echo "" >> /tmp/BACKUP_README.md
+    echo "See the documentation in the longhorn-backup chart for full recovery procedures." >> /tmp/BACKUP_README.md
+    echo "" >> /tmp/BACKUP_README.md
+    echo "Quick restore command:" >> /tmp/BACKUP_README.md
+    echo '```bash' >> /tmp/BACKUP_README.md
+    echo './scripts/restore-pvc.sh <namespace> <pvc-name> [backup-name]' >> /tmp/BACKUP_README.md
+    echo '```' >> /tmp/BACKUP_README.md
+    echo "" >> /tmp/BACKUP_README.md
+    echo "## Backed Up PVCs" >> /tmp/BACKUP_README.md
+    echo "" >> /tmp/BACKUP_README.md
+    
+    # Add PVC details
+    jq -r '.backups[] | "### \(.namespace)/\(.pvc_name)\n- **Volume**: \(.volume_name)\n- **Size**: \(.size)\n- **Storage Class**: \(.storage_class)\n- **Backup Count**: \(.backups | length)\n- **Latest Backup**: \(.backups | sort_by(.created) | last | .created // "None")\n"' /tmp/backup-index.json >> /tmp/BACKUP_README.md
+    
+    # Copy to backup target
+    cp /tmp/backup-index.json "${INDEX_FILE}"
+    cp /tmp/BACKUP_README.md "${README_FILE}"
+    
+    BACKUP_COUNT=$(jq '.backups | length' /tmp/backup-index.json)
+    
+    echo ""
+    echo "=========================================="
+    echo "Index generated successfully"
+    echo "Total PVCs indexed: ${BACKUP_COUNT}"
+    echo "=========================================="

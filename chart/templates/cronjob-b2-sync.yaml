@@ -1,0 +1,102 @@
+{{- if and .Values.backblaze.enabled .Values.b2Sync.enabled }}
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: {{ include "longhorn-backup.fullname" . }}-b2-sync
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "longhorn-backup.labels" . | nindent 4 }}
+spec:
+  schedule: {{ .Values.b2Sync.schedule | quote }}
+  concurrencyPolicy: Forbid
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 3
+  jobTemplate:
+    spec:
+      backoffLimit: 2
+      template:
+        metadata:
+          labels:
+            {{- include "longhorn-backup.selectorLabels" . | nindent 12 }}
+            app.kubernetes.io/component: b2-sync
+        spec:
+          serviceAccountName: {{ include "longhorn-backup.serviceAccountName" . }}
+          restartPolicy: OnFailure
+          {{- with .Values.nodeSelector }}
+          nodeSelector:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          {{- with .Values.tolerations }}
+          tolerations:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          {{- with .Values.affinity }}
+          affinity:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          securityContext:
+            {{- toYaml .Values.podSecurityContext | nindent 12 }}
+          containers:
+            - name: rclone
+              image: "{{ .Values.b2Sync.image.repository }}:{{ .Values.b2Sync.image.tag }}"
+              imagePullPolicy: {{ .Values.b2Sync.image.pullPolicy }}
+              command:
+                - /bin/sh
+                - -c
+                - |
+                  source /scripts/send-notification.sh
+                  /scripts/sync-to-b2.sh
+              env:
+                - name: B2_ACCOUNT_ID
+                  valueFrom:
+                    secretKeyRef:
+                      name: {{ include "longhorn-backup.b2SecretName" . }}
+                      key: AWS_ACCESS_KEY_ID
+                - name: B2_APPLICATION_KEY
+                  valueFrom:
+                    secretKeyRef:
+                      name: {{ include "longhorn-backup.b2SecretName" . }}
+                      key: AWS_SECRET_ACCESS_KEY
+                - name: B2_BUCKET
+                  value: {{ .Values.backblaze.bucket | quote }}
+                - name: RCLONE_CRYPT_PASSWORD
+                  valueFrom:
+                    secretKeyRef:
+                      name: {{ include "longhorn-backup.b2EncryptionSecretName" . }}
+                      key: password
+                - name: RCLONE_CRYPT_SALT
+                  valueFrom:
+                    secretKeyRef:
+                      name: {{ include "longhorn-backup.b2EncryptionSecretName" . }}
+                      key: salt
+                {{- if .Values.notifications.enabled }}
+                - name: WEBHOOK_URL
+                  {{- if .Values.notifications.existingSecret }}
+                  valueFrom:
+                    secretKeyRef:
+                      name: {{ .Values.notifications.existingSecret }}
+                      key: url
+                  {{- else }}
+                  value: {{ .Values.notifications.webhookUrl | quote }}
+                  {{- end }}
+                {{- end }}
+              securityContext:
+                {{- toYaml .Values.securityContext | nindent 16 }}
+              resources:
+                {{- toYaml .Values.b2Sync.resources | nindent 16 }}
+              volumeMounts:
+                - name: backup-source
+                  mountPath: /backup-source
+                  readOnly: true
+                - name: scripts
+                  mountPath: /scripts
+          volumes:
+            - name: backup-source
+              nfs:
+                server: {{ .Values.nfs.server }}
+                path: {{ .Values.nfs.path }}
+            - name: scripts
+              configMap:
+                name: {{ include "longhorn-backup.fullname" . }}-scripts
+                defaultMode: 0755
+{{- end }}

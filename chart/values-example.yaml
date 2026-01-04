@@ -1,0 +1,127 @@
+# Example values for production deployment
+# Copy this file and customize for your environment
+
+# Longhorn namespace - adjust based on your installation
+longhorn:
+  namespace: longhorn
+
+# TrueNAS NFS configuration
+nfs:
+  enabled: true
+  server: "192.168.20.50"  # Your TrueNAS IP
+  path: "/mnt/tank/kubernetes-backups"  # NFS export path
+
+# Backblaze B2 configuration
+backblaze:
+  enabled: true
+  bucket: "my-k8s-backups"
+  # Find your endpoint at: https://www.backblaze.com/b2/docs/s3_compatible_api.html
+  endpoint: "https://s3.us-west-004.backblazeb2.com"
+  
+  # Use existing SealedSecret for credentials
+  # Create with:
+  #   kubectl create secret generic longhorn-backup-b2-credentials \
+  #     --from-literal=AWS_ACCESS_KEY_ID=<key-id> \
+  #     --from-literal=AWS_SECRET_ACCESS_KEY=<app-key> \
+  #     --dry-run=client -o yaml | kubeseal -o yaml
+  existingSecret: "longhorn-backup-b2-credentials"
+  
+  encryption:
+    # Use existing SealedSecret for encryption keys
+    # IMPORTANT: These must be rclone-obscured values!
+    # Generate with:
+    #   PASS=$(openssl rand -base64 32)
+    #   SALT=$(openssl rand -base64 32)
+    #   OBSCURED_PASS=$(echo -n "$PASS" | rclone obscure -)
+    #   OBSCURED_SALT=$(echo -n "$SALT" | rclone obscure -)
+    #   kubectl create secret generic longhorn-backup-b2-encryption \
+    #     --from-literal=password="$OBSCURED_PASS" \
+    #     --from-literal=salt="$OBSCURED_SALT" \
+    #     --dry-run=client -o yaml | kubeseal -o yaml
+    existingSecret: "longhorn-backup-b2-encryption"
+
+# Backup schedules - adjust times for your timezone
+recurringJobs:
+  daily:
+    enabled: true
+    schedule: "0 2 * * *"  # 2 AM daily
+    retain: 7               # Keep 7 daily backups
+    concurrency: 2
+    labels:
+      backup.home.lab/tier: daily
+  
+  weekly:
+    enabled: true
+    schedule: "0 3 * * 0"  # 3 AM Sunday
+    retain: 5               # Keep 5 weekly backups
+    concurrency: 2
+    labels:
+      backup.home.lab/tier: weekly
+  
+  snapshot:
+    enabled: true
+    schedule: "0 */6 * * *"  # Every 6 hours
+    retain: 4
+    concurrency: 2
+
+# B2 sync - runs after Longhorn backups
+b2Sync:
+  enabled: true
+  schedule: "0 4 * * *"  # 4 AM daily
+  image:
+    repository: rclone/rclone
+    tag: "1.68"
+    pullPolicy: IfNotPresent
+  resources:
+    limits:
+      memory: 512Mi
+      cpu: 500m
+    requests:
+      memory: 256Mi
+      cpu: 100m
+  transfers: 4
+  checkers: 8
+  cleanupAgeDays: 35
+
+# Validation checks
+validation:
+  enabled: true
+  schedule: "0 6 * * *"  # 6 AM daily
+  warningAgeHours: 25    # Warn if backup > 25 hours old
+  errorAgeHours: 48      # Error if backup > 48 hours old
+
+# Backup index generation
+indexer:
+  enabled: true
+  schedule: "30 4 * * *"  # 4:30 AM daily
+
+# Notifications (Discord example)
+notifications:
+  enabled: true
+  # Direct webhook URL (not recommended - use secret instead)
+  # webhookUrl: "https://discord.com/api/webhooks/..."
+  
+  # Or use a SealedSecret containing the webhook URL
+  existingSecret: "longhorn-backup-webhook"
+
+# PVC selection criteria
+pvcSelector:
+  labelKey: "backup.home.lab/enabled"
+  labelValue: "true"
+
+# Service account
+serviceAccount:
+  create: true
+  name: backup-manager
+  annotations: {}
+
+# Pod scheduling (optional - for dedicated backup nodes)
+nodeSelector: {}
+  # kubernetes.io/role: storage
+
+tolerations: []
+  # - key: "storage"
+  #   operator: "Exists"
+  #   effect: "NoSchedule"
+
+affinity: {}
